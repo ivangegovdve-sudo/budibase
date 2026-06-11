@@ -1,4 +1,4 @@
-import { db, HTTPError } from "@budibase/backend-core"
+import { db, features, HTTPError } from "@budibase/backend-core"
 import {
   Agent,
   CreateAgentRequest,
@@ -20,6 +20,7 @@ import {
   UpdateAgentResponse,
   UserCtx,
   AgentOperation,
+  FeatureFlag,
 } from "@budibase/types"
 import sdk from "../../../sdk"
 
@@ -61,6 +62,17 @@ const obfuscateAgentSecrets = (agent: Agent): Agent => ({
     ]),
   }),
 })
+
+const assertMultipleOperationsAllowed = async (
+  operations?: AgentOperation[]
+) => {
+  if ((operations?.length ?? 0) <= 1) {
+    return
+  }
+  if (!(await features.isEnabled(FeatureFlag.MULTIPLE_OPERATIONS))) {
+    throw new HTTPError("Multiple operations are not enabled", 403)
+  }
+}
 
 const withoutKnowledgeConfig = <T extends Agent>(agent: T): T => ({
   ...agent,
@@ -264,6 +276,8 @@ export async function createAgent(
   const createdBy = ctx.user?._id!
   const globalId = db.getGlobalIDFromUserMetadataID(createdBy)
 
+  await assertMultipleOperationsAllowed(body.operations)
+
   const createRequest: RequiredKeys<
     Parameters<typeof sdk.ai.agents.create>[number]
   > = {
@@ -306,6 +320,8 @@ export async function updateAgent(
 ) {
   const body = ctx.request.body
   const existing = await sdk.ai.agents.getOrThrow(body._id)
+
+  await assertMultipleOperationsAllowed(body.operations)
 
   const updateRequest: RequiredKeys<UpdateAgentRequest> = {
     _id: body._id,
