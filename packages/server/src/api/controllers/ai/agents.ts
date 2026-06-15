@@ -1,4 +1,4 @@
-import { db, features, HTTPError } from "@budibase/backend-core"
+import { db, HTTPError } from "@budibase/backend-core"
 import {
   Agent,
   CreateAgentRequest,
@@ -19,68 +19,9 @@ import {
   UpdateAgentRequest,
   UpdateAgentResponse,
   UserCtx,
-  AgentOperation,
-  FeatureFlag,
 } from "@budibase/types"
 import sdk from "../../../sdk"
-
-const SECRET_MASK = "********"
-
-const maskSecretFields = <T extends object>(obj: T, fields: (keyof T)[]): T => {
-  const result = { ...obj }
-  for (const field of fields) {
-    if (result[field]) {
-      result[field] = SECRET_MASK as T[typeof field]
-    }
-  }
-  return result
-}
-
-const obfuscateAgentSecrets = (agent: Agent): Agent => ({
-  ...agent,
-  ...(agent.discordIntegration && {
-    discordIntegration: maskSecretFields(agent.discordIntegration, [
-      "publicKey",
-      "botToken",
-    ]),
-  }),
-  ...(agent.MSTeamsIntegration && {
-    MSTeamsIntegration: maskSecretFields(agent.MSTeamsIntegration, [
-      "appPassword",
-    ]),
-  }),
-  ...(agent.slackIntegration && {
-    slackIntegration: maskSecretFields(agent.slackIntegration, [
-      "botToken",
-      "signingSecret",
-    ]),
-  }),
-  ...(agent.telegramIntegration && {
-    telegramIntegration: maskSecretFields(agent.telegramIntegration, [
-      "botToken",
-      "webhookSecretToken",
-    ]),
-  }),
-})
-
-const assertMultipleOperationsAllowed = async (
-  operations?: AgentOperation[]
-) => {
-  if ((operations?.length ?? 0) <= 1) {
-    return
-  }
-  if (!(await features.isEnabled(FeatureFlag.MULTIPLE_OPERATIONS))) {
-    throw new HTTPError("Multiple operations are not enabled", 403)
-  }
-}
-
-const withoutKnowledgeConfig = <T extends Agent>(agent: T): T => ({
-  ...agent,
-  operations: agent.operations?.map(
-    ({ knowledgeSources: _knowledgeSources, ...operation }: AgentOperation) =>
-      operation
-  ),
-})
+import { toAgentResponse } from "./agentResponse"
 
 const parseOptionalChatAppId = (value: unknown) => {
   if (typeof value !== "string") {
@@ -266,7 +207,7 @@ export async function fetchTools(ctx: UserCtx<void, ToolMetadata[]>) {
 
 export async function fetchAgents(ctx: UserCtx<void, FetchAgentsResponse>) {
   const agents = await sdk.ai.agents.fetch()
-  ctx.body = { agents: agents.map(obfuscateAgentSecrets) }
+  ctx.body = { agents: agents.map(toAgentResponse) }
 }
 
 export async function createAgent(
@@ -276,11 +217,7 @@ export async function createAgent(
   const createdBy = ctx.user?._id!
   const globalId = db.getGlobalIDFromUserMetadataID(createdBy)
 
-  await assertMultipleOperationsAllowed(body.operations)
-
-  const createRequest: RequiredKeys<
-    Parameters<typeof sdk.ai.agents.create>[number]
-  > = {
+  const createRequest: Parameters<typeof sdk.ai.agents.create>[number] = {
     name: body.name,
     description: body.description,
     aiconfig: body.aiconfig,
@@ -294,24 +231,11 @@ export async function createAgent(
     MSTeamsIntegration: body.MSTeamsIntegration,
     slackIntegration: body.slackIntegration,
     telegramIntegration: body.telegramIntegration,
-    operations: body.operations?.map(
-      operation =>
-        ({
-          id: operation.id,
-          name: operation.name,
-          live: operation.live,
-          promptInstructions: operation.promptInstructions,
-          enabledTools: operation.enabledTools,
-          knowledgeBases: operation.knowledgeBases,
-          allowKnowledgeSourceDownload: operation.allowKnowledgeSourceDownload,
-          knowledgeSources: operation.knowledgeSources,
-        }) satisfies RequiredKeys<AgentOperation>
-    ),
   }
 
   const agent = await sdk.ai.agents.create(createRequest)
 
-  ctx.body = withoutKnowledgeConfig(obfuscateAgentSecrets(agent))
+  ctx.body = toAgentResponse(agent)
   ctx.status = 201
 }
 
@@ -320,8 +244,6 @@ export async function updateAgent(
 ) {
   const body = ctx.request.body
   const existing = await sdk.ai.agents.getOrThrow(body._id)
-
-  await assertMultipleOperationsAllowed(body.operations)
 
   const updateRequest: RequiredKeys<UpdateAgentRequest> = {
     _id: body._id,
@@ -338,26 +260,14 @@ export async function updateAgent(
     MSTeamsIntegration: body.MSTeamsIntegration,
     slackIntegration: body.slackIntegration,
     telegramIntegration: body.telegramIntegration,
-    operations: body.operations?.map(operation => {
-      const existingOperation = existing.operations?.find(
-        o => o.id == operation.id
-      )
-      return {
-        id: operation.id,
-        name: operation.name,
-        live: operation.live,
-        promptInstructions: operation.promptInstructions,
-        enabledTools: operation.enabledTools,
-        allowKnowledgeSourceDownload: operation.allowKnowledgeSourceDownload,
-        knowledgeBases: existingOperation?.knowledgeBases,
-        knowledgeSources: existingOperation?.knowledgeSources,
-      } satisfies RequiredKeys<AgentOperation>
-    }),
   }
 
-  const agent = await sdk.ai.agents.update(updateRequest)
+  const agent = await sdk.ai.agents.update({
+    ...existing,
+    ...updateRequest,
+  })
 
-  ctx.body = withoutKnowledgeConfig(obfuscateAgentSecrets(agent))
+  ctx.body = toAgentResponse(agent)
   ctx.status = 200
 }
 
@@ -688,7 +598,7 @@ export async function duplicateAgent(
   const globalId = db.getGlobalIDFromUserMetadataID(createdBy)
   const duplicated = await sdk.ai.agents.duplicate(sourceAgent, globalId)
 
-  ctx.body = obfuscateAgentSecrets(duplicated)
+  ctx.body = toAgentResponse(duplicated)
   ctx.status = 201
 }
 
